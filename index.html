@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR 블룸</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@700&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ink: #1a1320; --paper: #fff1f5; --muted: #c9b6c6; --lock: #ffd36e;
+  --line: rgba(255,255,255,.18);
+  --f-display: "Gowun Batang", "Nanum Myeongjo", serif;
+  --f-ui: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+}
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: #000; color: var(--paper); font-family: var(--f-ui); overflow: hidden; }
+#ar { position: fixed; inset: 0; }
+.intro {
+  position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 18px; padding: 24px; text-align: center; background: var(--ink);
+}
+.intro h1 { font-family: var(--f-display); font-size: 40px; margin: 0; }
+.intro p { margin: 0; color: var(--muted); line-height: 1.6; max-width: 30ch; }
+button {
+  font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; color: var(--paper);
+  padding: 12px 20px; border-radius: 999px; background: rgba(255,255,255,.1); border: 1px solid var(--line);
+}
+button.main { background: var(--paper); color: var(--ink); border-color: var(--paper); }
+button[aria-pressed="true"] { border-color: var(--paper); background: rgba(255,255,255,.22); }
+.hint {
+  position: fixed; z-index: 10; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 20px); transform: translateX(-50%);
+  padding: 9px 16px; border-radius: 999px; background: rgba(26,19,32,.7); border: 1px solid var(--line);
+  font-size: 14px; white-space: nowrap; backdrop-filter: blur(8px); display: flex; align-items: center; gap: 8px;
+}
+.hint b { width: 8px; height: 8px; border-radius: 50%; background: #6fe3ff; box-shadow: 0 0 10px #6fe3ff; }
+.hint.ok b { background: var(--lock); box-shadow: 0 0 10px var(--lock); }
+.dock {
+  position: fixed; z-index: 10; left: 0; right: 0; bottom: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+  padding: 16px max(16px, env(safe-area-inset-left, 0px)) calc(env(safe-area-inset-bottom, 0px) + 18px);
+}
+.dock button { padding: 9px 14px; font-size: 13px; font-weight: 500; background: rgba(26,19,32,.6); backdrop-filter: blur(8px); }
+.err { color: #ffb4a8; }
+/* hide MindAR's own scanning overlay; we show our own hint */
+.mindar-ui-scanning { display: none !important; }
+</style>
+</head>
+<body>
+<div id="ar"></div>
+
+<div class="intro" id="intro">
+  <h1>QR 블룸</h1>
+  <p>카메라를 켜고 포스터를 화면 가득 비춰주세요. QR이 꽃으로 피어나요.</p>
+  <button class="main" id="go">카메라 켜고 시작</button>
+  <p class="err" id="err" hidden></p>
+</div>
+
+<div class="hint" id="hint" hidden><b></b><span id="hintText">포스터를 비춰주세요</span></div>
+
+<div class="dock" id="dock" hidden>
+  <button data-p="spring" aria-pressed="true">봄 정원</button>
+  <button data-p="moon" aria-pressed="false">달빛</button>
+  <button data-p="dusk" aria-pressed="false">노을</button>
+  <button id="replay">↻ 다시 피우기</button>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { MindARThree } from 'mindar-image-three';
+
+const QR = ["11111110000011110011001111111", "10000010011100111010001000001", "10111010010010011101101011101", "10111010011100110010001011101", "10111010011100111110101011101", "10000010100100011001001000001", "11111110101010101010101111111", "00000000001000110111100000000", "10010110101011111001010100000", "10000000011100000110111001001", "11101111000000000001101001110", "10011000111001000001000010110", "01100111001101000100111101011", "10011101010001000001110000000", "10001010111110100110110011111", "00001000110011110101111001010", "01010111100100101101000100010", "00000000100010101010001101001", "10111110101111000000001100011", "00000100100110100111010010011", "10110010001010011000111110100", "00000000110000000100100010111", "11111110011110001110101010010", "10000010111010101000100011100", "10111010010100011110111110000", "10111010100010000001011111110", "10111010000100000001110011101", "10000010001001110101100000010", "11111110100010110101101110010"];            // module matrix — identical to the printed poster
+const INNER = 0.62;           // white QR panel width as a fraction of poster width
+
+const PALETTES = {
+  spring: { petals: ['#ff5c8a', '#ff9fb8', '#ffd1dc', '#ff7a59', '#fff1f5'], center: '#ffc93c', stem: '#4f8a4b', mote: '#ffd9e4' },
+  moon:   { petals: ['#7b6cff', '#a99bff', '#d7d1ff', '#4fd1ff', '#f4f2ff'], center: '#fff0a8', stem: '#2f6f73', mote: '#bfe9ff' },
+  dusk:   { petals: ['#ff6b3d', '#ffa24c', '#ffd36e', '#e8456b', '#fff1d6'], center: '#fff6e0', stem: '#6b8f3a', mote: '#ffe2b0' },
+};
+
+const clamp01 = x => Math.min(1, Math.max(0, x));
+const eOut = x => 1 - Math.pow(1 - x, 3);
+const eBack = x => { const c1 = 1.5, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const eInOut = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+let seed = 7;
+const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+const lighten = (hex, k) => new THREE.Color(hex).lerp(new THREE.Color('#ffffff'), k);
+
+function radialTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'); const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.35, 'rgba(255,255,255,.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const glowTex = radialTexture();
+
+function petalGeo({ len, wid, cup = .1, curl = 0, round = .5, ruffle = 0 }) {
+  const g = new THREE.PlaneGeometry(1, 1, 8, 14);
+  const p = g.attributes.position; const col = [];
+  for (let i = 0; i < p.count; i++) {
+    const u = p.getX(i) * 2, v = p.getY(i) + .5;
+    const w = Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(v, .72))), round);
+    p.setXYZ(i, u * wid * .5 * w, v * len, cup * u * u * w * wid * .5 + curl * v * v * len + ruffle * Math.sin(u * 7 + v * 9) * v * .04);
+    const c = .5 + .5 * Math.pow(v, .55) + .08 * Math.abs(u) * v;
+    col.push(c, c, c);
+  }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
+const TYPES = {
+  daisy:  { center: .15, layers: [{ n: 16, len: .78, wid: .17, cup: .06, curl: -.06, round: .45, open: .1, delay: 0, light: 0 }] },
+  cosmos: { center: .1,  layers: [{ n: 8, len: .74, wid: .42, cup: .1, curl: -.02, round: .5, ruffle: 1, open: .08, delay: 0, light: 0 }] },
+  peony:  { center: .08, layers: [
+            { n: 10, len: .7, wid: .48, cup: .24, curl: .02, round: .42, ruffle: 1, open: .32, delay: 0, light: 0 },
+            { n: 8, len: .56, wid: .44, cup: .3, curl: .08, round: .42, ruffle: 1, open: .72, delay: .16, light: .22 },
+            { n: 6, len: .42, wid: .38, cup: .36, curl: .14, round: .42, ruffle: 1, open: 1.08, delay: .32, light: .45 } ] },
+  lily:   { center: .05, stamens: true, layers: [{ n: 6, len: .98, wid: .32, cup: .14, curl: -.34, round: 1, open: .22, delay: 0, light: 0 }] },
+};
+const geoCache = new Map();
+const getPetal = (k, spec) => { if (!geoCache.has(k)) geoCache.set(k, petalGeo(spec)); return geoCache.get(k); };
+const matCache = new Map();
+function petalMat(color) {
+  const k = color.getHexString();
+  if (!matCache.has(k)) matCache.set(k, new THREE.MeshStandardMaterial({ color, vertexColors: true, roughness: .5, side: THREE.DoubleSide, emissive: color, emissiveIntensity: .18 }));
+  return matCache.get(k);
+}
+
+function makeFlower(type, color, pal) {
+  const T = TYPES[type]; const head = new THREE.Group(); const petals = [];
+  T.layers.forEach((L, li) => {
+    const geo = getPetal(type + li, L);
+    const mat = petalMat(lighten(color, L.light));
+    for (let j = 0; j < L.n; j++) {
+      const pivot = new THREE.Object3D();
+      pivot.rotation.z = (j / L.n) * Math.PI * 2 + li * Math.PI / L.n + (rnd() - .5) * .15;
+      const m = new THREE.Mesh(geo, mat); m.scale.setScalar(.9 + rnd() * .2);
+      pivot.add(m); head.add(pivot);
+      petals.push({ m, open: L.open + (rnd() - .5) * .12, delay: L.delay + rnd() * .08 });
+    }
+  });
+  const cMat = new THREE.MeshStandardMaterial({ color: pal.center, emissive: pal.center, emissiveIntensity: 1, roughness: .6 });
+  const c = new THREE.Mesh(new THREE.SphereGeometry(T.center, 18, 12), cMat); c.scale.z = .55; head.add(c);
+  if (T.stamens) for (let k = 0; k < 6; k++) {
+    const a = k / 6 * Math.PI * 2;
+    const st = new THREE.Mesh(new THREE.SphereGeometry(.035, 8, 6), cMat);
+    st.position.set(Math.cos(a) * .12, Math.sin(a) * .12, .42); head.add(st);
+  }
+  return { head, petals };
+}
+
+// ---------- QR geometry (matches poster: 3-module margin inside the white panel) ----------
+const N = QR.length, BOARD = 7, CELL = BOARD / (N + 6);
+const modules = [];
+for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (QR[r][c] === '1')
+  modules.push(new THREE.Vector3((c - (N - 1) / 2) * CELL, -(r - (N - 1) / 2) * CELL, 0));
+
+// ---------- AR setup ----------
+const mindar = new MindARThree({
+  container: document.getElementById('ar'),
+  imageTargetSrc: './targets.mind',
+  uiScanning: 'no', uiLoading: 'yes', uiError: 'yes',
+  filterMinCF: 0.0005, filterBeta: 0.01,
+});
+const { renderer, scene, camera } = mindar;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+scene.add(new THREE.HemisphereLight('#fff4f0', '#3a2f44', 1.4));
+const key = new THREE.DirectionalLight('#ffffff', 2.4); key.position.set(.4, .6, 1); scene.add(key);
+const rim = new THREE.DirectionalLight('#9fb8ff', 1.0); rim.position.set(-.6, -.2, .5); scene.add(rim);
+
+const anchor = mindar.addAnchor(0);
+const world = new THREE.Group();
+world.scale.setScalar(INNER / BOARD);
+anchor.group.add(world);
+const warm = new THREE.PointLight('#ffcf9a', 0, 14, 1.6); warm.position.set(0, 0, 4); world.add(warm);
+
+let S = null;
+function build(palName) {
+  for (let i = world.children.length - 1; i >= 0; i--) if (world.children[i] !== warm) world.remove(world.children[i]);
+  seed = 11;
+  const pal = PALETTES[palName];
+  S = { pal, flowers: [] };
+
+  // paper panel that covers the printed QR once the modules start to lift
+  const boardMat = new THREE.MeshBasicMaterial({ color: '#ffffff', toneMapped: false });
+  const board = new THREE.Mesh(new THREE.PlaneGeometry(BOARD, BOARD), boardMat);
+  board.position.z = .002; board.visible = false; world.add(board);
+  S.board = board; S.boardMat = boardMat;
+
+  const mGeo = new THREE.BoxGeometry(CELL * 1.0, CELL * 1.0, .1);
+  const mMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: .55 });
+  const inst = new THREE.InstancedMesh(mGeo, mMat, modules.length);
+  const maxD = BOARD * .5;
+  S.mods = modules.map((p, i) => ({
+    p, d: p.length() / maxD, rise: 1.4 + rnd() * 2.2, rx: (rnd() - .5) * 6, ry: (rnd() - .5) * 6,
+    drift: new THREE.Vector2((rnd() - .5) * .8, (rnd() - .5) * .8), col: new THREE.Color(pal.petals[i % pal.petals.length]),
+  }));
+  S.dark = new THREE.Color('#141219');
+  S.mods.forEach((m, i) => inst.setColorAt(i, S.dark));
+  inst.visible = false; world.add(inst); S.inst = inst;
+
+  const scanMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(.5, 1.9, 1.7), transparent: true, opacity: 0, toneMapped: false, blending: THREE.AdditiveBlending, depthWrite: false });
+  const scan = new THREE.Mesh(new THREE.PlaneGeometry(BOARD * 1.06, .06), scanMat); scan.position.z = .3; world.add(scan);
+  const scanGlowMat = new THREE.MeshBasicMaterial({ map: glowTex, color: '#6fe3ff', transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+  const scanGlow = new THREE.Mesh(new THREE.PlaneGeometry(BOARD * 1.2, 1), scanGlowMat); scanGlow.position.z = .28; world.add(scanGlow);
+  Object.assign(S, { scan, scanMat, scanGlow, scanGlowMat });
+
+  const picks = [];
+  const order = S.mods.map((m, i) => i).sort(() => rnd() - .5);
+  for (const i of order) {
+    const p = S.mods[i].p;
+    if (p.length() < 1.1) continue;
+    if (picks.every(j => S.mods[j].p.distanceTo(p) > 1.0)) picks.push(i);
+    if (picks.length >= 26) break;
+  }
+  const types = ['peony', 'daisy', 'cosmos', 'lily', 'peony', 'daisy'];
+  const stemMat = new THREE.MeshStandardMaterial({ color: pal.stem, roughness: .7 });
+  const leafGeo = petalGeo({ len: .55, wid: .22, cup: .2, curl: .15, round: .8 });
+  const leafMat = new THREE.MeshStandardMaterial({ color: pal.stem, vertexColors: true, side: THREE.DoubleSide, roughness: .6 });
+
+  picks.forEach((i, k) => {
+    const base = S.mods[i].p.clone(); base.z = .05;
+    const out = base.clone().setZ(0).normalize();
+    const L = 1.3 + rnd() * 2.1, spread = .35 + rnd() * .55;
+    const end = base.clone().add(new THREE.Vector3(out.x * spread, out.y * spread, L));
+    const mid = base.clone().lerp(end, .5).add(new THREE.Vector3((rnd() - .5) * .5, (rnd() - .5) * .5, 0));
+    const curve = new THREE.CatmullRomCurve3([base, base.clone().add(new THREE.Vector3(0, 0, L * .2)), mid, end]);
+    const SEG = 24, RAD = 6;
+    const stem = new THREE.Mesh(new THREE.TubeGeometry(curve, SEG, .03 + rnd() * .012, RAD, false), stemMat);
+    stem.geometry.setDrawRange(0, 0); world.add(stem);
+    const leaf = new THREE.Mesh(leafGeo, leafMat);
+    leaf.position.copy(curve.getPoint(.45));
+    leaf.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(out.x + (rnd() - .5), out.y + (rnd() - .5), .6).normalize());
+    leaf.scale.setScalar(0); world.add(leaf);
+    const type = types[k % types.length];
+    const { head, petals } = makeFlower(type, new THREE.Color(pal.petals[k % pal.petals.length]), pal);
+    head.position.copy(end);
+    head.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), curve.getTangent(1).lerp(new THREE.Vector3(0, 0, 1), .35).normalize());
+    head.scale.setScalar(0); world.add(head);
+    const sz = (type === 'peony' ? 1.05 : .9) * (.75 + rnd() * .45);
+    S.flowers.push({ stem, SEG, RAD, leaf, head, petals, sz, t0: 2.0 + S.mods[i].d * 1.1 + rnd() * .3, ph: rnd() * 6, baseQ: head.quaternion.clone(), end });
+  });
+
+  {
+    const { head, petals } = makeFlower('peony', new THREE.Color(pal.petals[0]), pal);
+    const outer = getPetal('heroOuter', { len: .95, wid: .5, cup: .18, curl: -.05, round: .45, ruffle: 1 });
+    const oMat = petalMat(new THREE.Color(pal.petals[1]));
+    for (let j = 0; j < 12; j++) {
+      const pv = new THREE.Object3D(); pv.rotation.z = j / 12 * Math.PI * 2 + .13;
+      const m = new THREE.Mesh(outer, oMat); pv.add(m); head.add(pv);
+      petals.push({ m, open: -.05 + rnd() * .08, delay: -.12 });
+    }
+    head.position.set(0, 0, 1.4); head.scale.setScalar(0); world.add(head);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: pal.center, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
+    glow.position.set(0, 0, 1.2); glow.scale.setScalar(0); world.add(glow);
+    S.hero = { head, petals, t0: 4.3, glow };
+  }
+
+  const PN = 300;
+  const pGeo = petalGeo({ len: .24, wid: .14, cup: .12, curl: .05, round: .5 });
+  const pMat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: .5, emissive: '#ffffff', emissiveIntensity: .08 });
+  const parts = new THREE.InstancedMesh(pGeo, pMat, PN);
+  S.parts = [];
+  for (let i = 0; i < PN; i++) {
+    const f = S.flowers[i % S.flowers.length];
+    S.parts.push({ start: f.end.clone(), b: rnd() * 5, life: 4.5 + rnd() * 2.5, w: .35 + rnd() * .5, rise: .2 + rnd() * .5, vz: .5 + rnd() * .7, out: .5 + rnd() * .8, ph: rnd() * 6, s: .7 + rnd() * .8 });
+    parts.setColorAt(i, new THREE.Color(pal.petals[(i * 7) % pal.petals.length]));
+  }
+  world.add(parts); S.partsMesh = parts;
+
+  const MN = 200, mp = new Float32Array(MN * 3);
+  for (let i = 0; i < MN; i++) { mp[i * 3] = (rnd() - .5) * 14; mp[i * 3 + 1] = (rnd() - .5) * 14; mp[i * 3 + 2] = rnd() * 6; }
+  const mg = new THREE.BufferGeometry(); mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
+  S.motes = new THREE.Points(mg, new THREE.PointsMaterial({ map: glowTex, color: pal.mote, size: .18, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
+  world.add(S.motes);
+}
+
+const dummy = new THREE.Object3D(), tmpC = new THREE.Color();
+function update(T) {
+  const sp = clamp01(T / 1.2);
+  const scanOn = T < 1.4 ? Math.sin(Math.PI * clamp01(T / 1.4)) : 0;
+  S.scan.position.y = BOARD * .5 - sp * BOARD; S.scanGlow.position.y = S.scan.position.y;
+  S.scanMat.opacity = scanOn; S.scanGlowMat.opacity = scanOn * .6;
+
+  const on = T > 1.25;
+  S.board.visible = on; S.inst.visible = on;
+  S.boardMat.color.set('#ffffff').lerp(tmpC.set(S.pal.petals[2]), eInOut(clamp01((T - 3.2) / 2.5)) * .5);
+
+  S.mods.forEach((m, i) => {
+    const p = clamp01((T - 1.45 - m.d * .9) / 1.3), e = eOut(p);
+    dummy.position.set(m.p.x + m.drift.x * e, m.p.y + m.drift.y * e, .05 + e * m.rise);
+    dummy.rotation.set(m.rx * e, m.ry * e, 0);
+    dummy.scale.setScalar(Math.max(p < .55 ? 1 : 1 - eInOut((p - .55) / .45), .0001));
+    dummy.updateMatrix(); S.inst.setMatrixAt(i, dummy.matrix);
+    tmpC.copy(S.dark).lerp(m.col, clamp01(p * 2.2)); S.inst.setColorAt(i, tmpC);
+  });
+  S.inst.instanceMatrix.needsUpdate = true; S.inst.instanceColor.needsUpdate = true;
+
+  S.flowers.forEach(f => {
+    const g = clamp01((T - f.t0) / 1.1);
+    f.stem.geometry.setDrawRange(0, Math.floor(eOut(g) * f.SEG) * f.RAD * 6);
+    f.leaf.scale.setScalar(eBack(clamp01((T - f.t0 - .4) / .8)) * .9);
+    const b = T - f.t0 - .85;
+    f.head.scale.setScalar(Math.max(eBack(clamp01(b / .7)) * f.sz, .0001));
+    f.petals.forEach(pt => { pt.m.rotation.x = 1.45 + (pt.open - 1.45) * eBack(clamp01((b - pt.delay) / 1.5)); });
+    f.head.quaternion.copy(f.baseQ);
+    f.head.rotateZ(T * .15 + f.ph);
+    f.head.rotateX(Math.sin(T * 1.3 + f.ph) * clamp01(b) * .06);
+  });
+
+  const H = S.hero, hb = T - H.t0;
+  H.head.scale.setScalar(Math.max(eBack(clamp01(hb / 1.0)) * 1.9, .0001));
+  H.head.rotation.z = T * .12;
+  H.petals.forEach(pt => { pt.m.rotation.x = 1.45 + (pt.open - 1.45) * eBack(clamp01((hb - .25 - pt.delay) / 2.0)); });
+  const gl = clamp01(hb / 1.2);
+  H.glow.material.opacity = gl * (.3 + .08 * Math.sin(T * 2));
+  H.glow.scale.setScalar(gl * 4.2);
+  warm.intensity = gl * 5;
+
+  S.parts.forEach((q, i) => {
+    let t = T - 5.0 - q.b;
+    if (t < 0) dummy.scale.setScalar(.0001);
+    else {
+      t %= q.life;
+      const a = Math.atan2(q.start.y, q.start.x) + q.w * t, R = Math.hypot(q.start.x, q.start.y) + q.out * t;
+      dummy.position.set(R * Math.cos(a), R * Math.sin(a) + q.rise * t, q.start.z + q.vz * t);
+      dummy.rotation.set(t * 2.6 + q.ph, t * 1.9, t * 1.2 + q.ph);
+      dummy.scale.setScalar(q.s * Math.pow(Math.sin(Math.PI * t / q.life), .5) + .0001);
+    }
+    dummy.updateMatrix(); S.partsMesh.setMatrixAt(i, dummy.matrix);
+  });
+  S.partsMesh.instanceMatrix.needsUpdate = true;
+
+  S.motes.material.opacity = clamp01((T - 3.5) / 2) * .8;
+  S.motes.rotation.z = T * .02;
+}
+
+// ---------- UI ----------
+const hint = document.getElementById('hint'), hintText = document.getElementById('hintText');
+let current = 'spring', tStart = null, tracking = false;
+function setHint(txt, ok) { hintText.textContent = txt; hint.classList.toggle('ok', ok); }
+
+anchor.onTargetFound = () => {
+  tracking = true;
+  if (tStart === null) tStart = performance.now();
+  setHint('인식 완료 · 피어나는 중', true);
+};
+anchor.onTargetLost = () => { tracking = false; setHint('포스터를 다시 비춰주세요', false); };
+
+function restart() { build(current); tStart = tracking ? performance.now() : null; }
+document.querySelectorAll('[data-p]').forEach(b => b.addEventListener('click', () => {
+  current = b.dataset.p;
+  document.querySelectorAll('[data-p]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  restart();
+}));
+document.getElementById('replay').addEventListener('click', restart);
+
+build(current);
+
+document.getElementById('go').addEventListener('click', async () => {
+  const err = document.getElementById('err');
+  try {
+    const chk = await fetch('./targets.mind', { method: 'HEAD', cache: 'no-store' });
+    if (!chk.ok) { err.hidden = false; err.textContent = 'targets.mind 파일을 찾을 수 없어요. index.html과 같은 폴더에 올렸는지 확인해주세요.'; return; }
+    document.getElementById('go').textContent = '카메라 준비 중…';
+    await mindar.start();
+    document.getElementById('intro').hidden = true;
+    hint.hidden = false; document.getElementById('dock').hidden = false;
+    renderer.setAnimationLoop(() => {
+      if (tStart !== null) update((performance.now() - tStart) / 1000);
+      renderer.render(scene, camera);
+    });
+  } catch (e) {
+    err.hidden = false;
+    err.textContent = '카메라를 켤 수 없어요. 브라우저 설정에서 카메라 권한을 허용한 뒤 새로고침해주세요.';
+    console.error(e);
+  }
+});
+</script>
+</body>
+</html>
